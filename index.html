@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Déchiffrage Piano</title>
-  <!-- Librairies VexFlow (partition) et Pitchfinder (détection audio) -->
   <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.4/build/cjs/vexflow.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pitchfinder/dist/pitchfinder.min.js"></script>
   <style>
@@ -49,10 +48,20 @@
       box-shadow: 0 4px 12px rgba(0,0,0,0.5);
     }
     #feedback {
-      height: 30px;
-      margin-top: 15px;
-      font-size: 20px;
+      height: 28px;
+      margin-top: 10px;
+      font-size: 18px;
       font-weight: bold;
+    }
+    #debug {
+      margin-top: 10px;
+      font-family: monospace;
+      font-size: 14px;
+      color: #aaa;
+      background: #1e1e1e;
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 4px;
     }
   </style>
 </head>
@@ -72,9 +81,9 @@
     <label>
       Mode :
       <select id="mode-select">
-        <option value="sprint">Sprint (10 notes chrono)</option>
-        <option value="survival">Survie (30 secondes)</option>
-        <option value="memory">Mémoire (Masqué après 2s)</option>
+        <option value="sprint">Sprint (10 notes)</option>
+        <option value="survival">Survie (30s)</option>
+        <option value="memory">Mémoire (2s)</option>
       </select>
     </label>
 
@@ -84,6 +93,7 @@
   <div id="score-board">Prêt à démarrer</div>
   <div id="staff-container"><div id="output"></div></div>
   <div id="feedback"></div>
+  <div id="debug">Micro en attente...</div>
 
   <script>
     const VF = Vex.Flow;
@@ -98,7 +108,6 @@
     let startTime = 0;
     let timeLeft = 30;
 
-    // Définition des notes (format VexFlow et fréquences fondamentales Hz)
     const notesBass = [
       { key: "c/3", freq: 130.81, name: "Do" },
       { key: "d/3", freq: 146.83, name: "Ré" },
@@ -119,7 +128,6 @@
       { key: "b/4", freq: 493.88, name: "Si" }
     ];
 
-    // Rendu graphique de la portée
     function drawNote(noteObj, hideNote = false) {
       const container = document.getElementById("output");
       container.innerHTML = "";
@@ -145,7 +153,6 @@
       }
     }
 
-    // Gestion de la note suivante
     function nextNote() {
       const clef = document.getElementById("clef-select").value;
       const mode = document.getElementById("mode-select").value;
@@ -162,49 +169,71 @@
       }
     }
 
-    // Initialisation du microphone et du pitch detector
     async function initAudio() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+      });
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(stream);
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 2048;
       source.connect(analyser);
 
-      detector = Pitchfinder.YIN({ sampleRate: audioCtx.sampleRate, threshold: 0.15 });
+      // Seuil assoupli à 0.20 pour mieux capter les pianos acoustiques et numériques
+      detector = Pitchfinder.YIN({ sampleRate: audioCtx.sampleRate, threshold: 0.20 });
       listenAudio();
     }
 
-    // Boucle d'écoute micro
     function listenAudio() {
       const buffer = new Float32Array(analyser.fftSize);
-      
+      const debugEl = document.getElementById("debug");
+
       function checkPitch() {
         if (!isRunning) return;
         analyser.getFloatTimeDomainData(buffer);
-        const pitch = detector(buffer);
 
-        if (pitch && currentNote) {
-          const lowerBound = currentNote.freq * 0.96;
-          const upperBound = currentNote.freq * 1.04;
+        // Calcul du volume moyen (RMS)
+        let sum = 0;
+        for (let i = 0; i < buffer.length; i++) {
+          sum += buffer[i] * buffer[i];
+        }
+        const rms = Math.sqrt(sum / buffer.length);
 
-          if (pitch >= lowerBound && pitch <= upperBound) {
-            handleSuccess();
+        if (rms > 0.01) { // Filtre le silence de la pièce
+          const pitch = detector(buffer);
+          if (pitch) {
+            debugEl.textContent = `Entendu : ${Math.round(pitch)} Hz`;
+
+            if (currentNote) {
+              // Tolérance sur la fréquence fondamentale OU sur son octave supérieure/inférieure (harmoniques)
+              const matchesBase = Math.abs(pitch - currentNote.freq) / currentNote.freq < 0.07;
+              const matchesOctaveUp = Math.abs(pitch - (currentNote.freq * 2)) / (currentNote.freq * 2) < 0.07;
+              const matchesOctaveDown = Math.abs(pitch - (currentNote.freq / 2)) / (currentNote.freq / 2) < 0.07;
+
+              if (matchesBase || matchesOctaveUp || matchesOctaveDown) {
+                handleSuccess();
+              }
+            }
           }
+        } else {
+          debugEl.textContent = "Écoute en cours (joue une touche)...";
         }
         requestAnimationFrame(checkPitch);
       }
       requestAnimationFrame(checkPitch);
     }
 
-    // Validation de note
     function handleSuccess() {
       score++;
       const mode = document.getElementById("mode-select").value;
       const feedback = document.getElementById("feedback");
-      feedback.textContent = "✓ Bien joué !";
+      feedback.textContent = `✓ ${currentNote.name} validé !`;
       feedback.style.color = "#4caf50";
-      setTimeout(() => { feedback.textContent = ""; }, 400);
+      setTimeout(() => { feedback.textContent = ""; }, 500);
 
       if (mode === "sprint" && score >= targetCount) {
         endGame(`Sprint terminé en ${((Date.now() - startTime) / 1000).toFixed(1)}s !`);
@@ -232,10 +261,10 @@
         timerInterval = setInterval(() => {
           timeLeft--;
           document.getElementById("score-board").textContent = `Score : ${score} | Temps restant : ${timeLeft}s`;
-          if (timeLeft <= 0) endGame(`Temps écoulé ! Score final : ${score} notes`);
+          if (timeLeft <= 0) endGame(`Temps écoulé ! Score : ${score} notes`);
         }, 1000);
       } else {
-        document.getElementById("score-board").textContent = "Mémorise la note (2s) puis joue-la !";
+        document.getElementById("score-board").textContent = "Mémorise (2s) puis joue la note !";
       }
 
       nextNote();
@@ -246,6 +275,7 @@
       clearInterval(timerInterval);
       clearTimeout(memoryTimeout);
       document.getElementById("score-board").textContent = message;
+      document.getElementById("debug").textContent = "Session terminée";
       drawNote(null, true);
     }
 
