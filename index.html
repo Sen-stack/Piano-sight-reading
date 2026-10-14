@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Déchiffrage Piano</title>
   <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.4/build/cjs/vexflow.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/pitchfinder/dist/pitchfinder.min.js"></script>
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -99,7 +98,7 @@
 
   <script>
     const VF = Vex.Flow;
-    let audioCtx, analyser, detector;
+    let audioCtx, analyser;
     let isRunning = false;
     let currentNote = null;
     let timerInterval = null;
@@ -129,6 +128,54 @@
       { key: "a/4", freq: 440.00, name: "La" },
       { key: "b/4", freq: 493.88, name: "Si" }
     ];
+
+    // Algorithme d'autocorrélation intégré (Pitch detection pur JS)
+    function autoCorrelate(buffer, sampleRate) {
+      let size = buffer.length;
+      let sumOfSquares = 0;
+      for (let i = 0; i < size; i++) {
+        sumOfSquares += buffer[i] * buffer[i];
+      }
+      let rootMeanSquare = Math.sqrt(sumOfSquares / size);
+      if (rootMeanSquare < 0.008) return -1; // Volume trop faible
+
+      let r1 = 0, r2 = size - 1, threshold = 0.2;
+      for (let i = 0; i < size / 2; i++) {
+        if (Math.abs(buffer[i]) < threshold) { r1 = i; break; }
+      }
+      for (let i = 1; i < size / 2; i++) {
+        if (Math.abs(buffer[size - i]) < threshold) { r2 = size - i; break; }
+      }
+
+      buffer = buffer.slice(r1, r2);
+      size = buffer.length;
+
+      let c = new Array(size).fill(0);
+      for (let i = 0; i < size; i++) {
+        for (let j = 0; j < size - i; j++) {
+          c[i] = c[i] + buffer[j] * buffer[j + i];
+        }
+      }
+
+      let d = 0;
+      while (c[d] > c[d + 1]) d++;
+      let maxval = -1, maxpos = -1;
+      for (let i = d; i < size; i++) {
+        if (c[i] > maxval) {
+          maxval = c[i];
+          maxpos = i;
+        }
+      }
+      let T0 = maxpos;
+
+      // Interpolation parabolique pour affiner la fréquence
+      let x1 = c[T0 - 1], x2 = c[T0], x3 = c[T0 + 1];
+      let a = (x1 + x3 - 2 * x2) / 2;
+      let b = (x3 - x1) / 2;
+      if (a) T0 = T0 - b / (2 * a);
+
+      return sampleRate / T0;
+    }
 
     function drawNote(noteObj, hideNote = false) {
       const container = document.getElementById("output");
@@ -178,14 +225,12 @@
         audioCtx = new AudioContextClass();
         await audioCtx.resume();
 
-        // Récupération audio sans forcer de contraintes strictes
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const source = audioCtx.createMediaStreamSource(stream);
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 2048;
         source.connect(analyser);
 
-        detector = Pitchfinder.YIN({ sampleRate: audioCtx.sampleRate, threshold: 0.25 });
         debugEl.textContent = "Micro prêt. Joue une note !";
         listenAudio();
       } catch (err) {
@@ -201,33 +246,23 @@
         if (!isRunning) return;
         analyser.getFloatTimeDomainData(buffer);
 
-        let sum = 0;
-        for (let i = 0; i < buffer.length; i++) {
-          sum += buffer[i] * buffer[i];
-        }
-        const rms = Math.sqrt(sum / buffer.length);
+        const pitch = autoCorrelate(buffer, audioCtx.sampleRate);
 
-        // Seuil abaissé à 0.003 pour capter même un son faible
-        if (rms > 0.003) {
-          const pitch = detector(buffer);
-          if (pitch) {
-            const roundedPitch = Math.round(pitch);
-            debugEl.textContent = `Signal : ${(rms * 100).toFixed(0)}% | Hz : ${roundedPitch}`;
+        if (pitch !== -1 && pitch > 60 && pitch < 1200) {
+          const roundedPitch = Math.round(pitch);
+          debugEl.textContent = `Hz : ${roundedPitch}`;
 
-            if (currentNote) {
-              const matchesBase = Math.abs(pitch - currentNote.freq) / currentNote.freq < 0.08;
-              const matchesOctaveUp = Math.abs(pitch - (currentNote.freq * 2)) / (currentNote.freq * 2) < 0.08;
-              const matchesOctaveDown = Math.abs(pitch - (currentNote.freq / 2)) / (currentNote.freq / 2) < 0.08;
+          if (currentNote) {
+            const matchesBase = Math.abs(pitch - currentNote.freq) / currentNote.freq < 0.08;
+            const matchesOctaveUp = Math.abs(pitch - (currentNote.freq * 2)) / (currentNote.freq * 2) < 0.08;
+            const matchesOctaveDown = Math.abs(pitch - (currentNote.freq / 2)) / (currentNote.freq / 2) < 0.08;
 
-              if (matchesBase || matchesOctaveUp || matchesOctaveDown) {
-                handleSuccess();
-              }
+            if (matchesBase || matchesOctaveUp || matchesOctaveDown) {
+              handleSuccess();
             }
-          } else {
-            debugEl.textContent = `Signal : ${(rms * 100).toFixed(0)}% | Note indéterminée`;
           }
         } else {
-          debugEl.textContent = `En attente (Volume : ${(rms * 100).toFixed(1)}%)`;
+          debugEl.textContent = "En attente d'une note...";
         }
         requestAnimationFrame(checkPitch);
       }
@@ -240,7 +275,7 @@
       const feedback = document.getElementById("feedback");
       feedback.textContent = `✓ ${currentNote.name} validé !`;
       feedback.style.color = "#4caf50";
-      setTimeout(() => { feedback.textContent = ""; }, 500);
+      setTimeout(() => { feedback.textContent = ""; }, 400);
 
       if (mode === "sprint" && score >= targetCount) {
         endGame(`Sprint terminé en ${((Date.now() - startTime) / 1000).toFixed(1)}s !`);
@@ -250,49 +285,4 @@
     }
 
     function startGame() {
-      const mode = document.getElementById("mode-select").value;
-      score = 0;
-      isRunning = true;
-      startTime = Date.now();
-      clearInterval(timerInterval);
-
-      if (mode === "sprint") {
-        document.getElementById("score-board").textContent = `Notes : 0 / ${targetCount}`;
-        timerInterval = setInterval(() => {
-          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-          document.getElementById("score-board").textContent = `Notes : ${score} / ${targetCount} | ${elapsed}s`;
-        }, 100);
-      } else if (mode === "survival") {
-        timeLeft = 30;
-        document.getElementById("score-board").textContent = `Score : 0 | Restant : ${timeLeft}s`;
-        timerInterval = setInterval(() => {
-          timeLeft--;
-          document.getElementById("score-board").textContent = `Score : ${score} | Restant : ${timeLeft}s`;
-          if (timeLeft <= 0) endGame(`Temps écoulé ! Score : ${score}`);
-        }, 1000);
-      } else {
-        document.getElementById("score-board").textContent = "Mémorise (2s) puis joue !";
-      }
-
-      nextNote();
-    }
-
-    function endGame(message) {
-      isRunning = false;
-      clearInterval(timerInterval);
-      clearTimeout(memoryTimeout);
-      document.getElementById("score-board").textContent = message;
-      document.getElementById("debug").textContent = "Session terminée";
-      drawNote(null, true);
-    }
-
-    document.getElementById("start-btn").addEventListener("click", async () => {
-      if (!audioCtx) await initAudio();
-      if (audioCtx && audioCtx.state === "suspended") await audioCtx.resume();
-      startGame();
-    });
-
-    drawNote(null, true);
-  </script>
-</body>
-</html>
+      const mode = document.getElementById("mode-select
