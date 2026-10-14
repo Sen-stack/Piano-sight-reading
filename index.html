@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Déchiffrage Piano</title>
+  <!-- Librairies VexFlow (partition) et Pitchfinder (détection audio) -->
+  <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.4/build/cjs/vexflow.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pitchfinder/dist/pitchfinder.min.js"></script>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      text-align: center;
+      background: #121212;
+      color: #fff;
+      margin: 0;
+      padding: 10px;
+    }
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+    button, select {
+      padding: 8px 14px;
+      font-size: 14px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #222;
+      color: #fff;
+    }
+    button#start-btn {
+      background: #2e7d32;
+      border-color: #4caf50;
+      cursor: pointer;
+    }
+    #score-board {
+      font-size: 18px;
+      margin-bottom: 10px;
+      font-weight: bold;
+    }
+    #staff-container {
+      background: #fff;
+      border-radius: 8px;
+      display: inline-block;
+      padding: 10px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    #feedback {
+      height: 30px;
+      margin-top: 15px;
+      font-size: 20px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>Déchiffrage Piano</h2>
+
+  <div id="controls">
+    <label>
+      Clé :
+      <select id="clef-select">
+        <option value="bass">Clé de Fa</option>
+        <option value="treble">Clé de Sol</option>
+      </select>
+    </label>
+
+    <label>
+      Mode :
+      <select id="mode-select">
+        <option value="sprint">Sprint (10 notes chrono)</option>
+        <option value="survival">Survie (30 secondes)</option>
+        <option value="memory">Mémoire (Masqué après 2s)</option>
+      </select>
+    </label>
+
+    <button id="start-btn">Activer le micro & Démarrer</button>
+  </div>
+
+  <div id="score-board">Prêt à démarrer</div>
+  <div id="staff-container"><div id="output"></div></div>
+  <div id="feedback"></div>
+
+  <script>
+    const VF = Vex.Flow;
+    let audioCtx, analyser, detector;
+    let isRunning = false;
+    let currentNote = null;
+    let timerInterval = null;
+    let memoryTimeout = null;
+
+    let targetCount = 10;
+    let score = 0;
+    let startTime = 0;
+    let timeLeft = 30;
+
+    // Définition des notes (format VexFlow et fréquences fondamentales Hz)
+    const notesBass = [
+      { key: "c/3", freq: 130.81, name: "Do" },
+      { key: "d/3", freq: 146.83, name: "Ré" },
+      { key: "e/3", freq: 164.81, name: "Mi" },
+      { key: "f/3", freq: 174.61, name: "Fa" },
+      { key: "g/3", freq: 196.00, name: "Sol" },
+      { key: "a/3", freq: 220.00, name: "La" },
+      { key: "b/3", freq: 246.94, name: "Si" }
+    ];
+
+    const notesTreble = [
+      { key: "c/4", freq: 261.63, name: "Do" },
+      { key: "d/4", freq: 293.66, name: "Ré" },
+      { key: "e/4", freq: 329.63, name: "Mi" },
+      { key: "f/4", freq: 349.23, name: "Fa" },
+      { key: "g/4", freq: 392.00, name: "Sol" },
+      { key: "a/4", freq: 440.00, name: "La" },
+      { key: "b/4", freq: 493.88, name: "Si" }
+    ];
+
+    // Rendu graphique de la portée
+    function drawNote(noteObj, hideNote = false) {
+      const container = document.getElementById("output");
+      container.innerHTML = "";
+      const clef = document.getElementById("clef-select").value;
+
+      const renderer = new VF.Renderer(container, VF.Renderer.Backends.SVG);
+      renderer.resize(250, 150);
+      const context = renderer.getContext();
+
+      const stave = new VF.Stave(10, 10, 230);
+      stave.addClef(clef).setContext(context).draw();
+
+      if (!hideNote && noteObj) {
+        const staveNote = new VF.StaveNote({
+          clef: clef,
+          keys: [noteObj.key],
+          duration: "q"
+        });
+        const voice = new VF.Voice({ num_beats: 1, beat_value: 4 });
+        voice.addTickables([staveNote]);
+        new VF.Formatter().joinVoices([voice]).format([voice], 120);
+        voice.draw(context, stave);
+      }
+    }
+
+    // Gestion de la note suivante
+    function nextNote() {
+      const clef = document.getElementById("clef-select").value;
+      const mode = document.getElementById("mode-select").value;
+      const notePool = clef === "bass" ? notesBass : notesTreble;
+
+      currentNote = notePool[Math.floor(Math.random() * notePool.length)];
+      drawNote(currentNote, false);
+
+      clearTimeout(memoryTimeout);
+      if (mode === "memory") {
+        memoryTimeout = setTimeout(() => {
+          drawNote(null, true);
+        }, 2000);
+      }
+    }
+
+    // Initialisation du microphone et du pitch detector
+    async function initAudio() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+
+      detector = Pitchfinder.YIN({ sampleRate: audioCtx.sampleRate, threshold: 0.15 });
+      listenAudio();
+    }
+
+    // Boucle d'écoute micro
+    function listenAudio() {
+      const buffer = new Float32Array(analyser.fftSize);
+      
+      function checkPitch() {
+        if (!isRunning) return;
+        analyser.getFloatTimeDomainData(buffer);
+        const pitch = detector(buffer);
+
+        if (pitch && currentNote) {
+          const lowerBound = currentNote.freq * 0.96;
+          const upperBound = currentNote.freq * 1.04;
+
+          if (pitch >= lowerBound && pitch <= upperBound) {
+            handleSuccess();
+          }
+        }
+        requestAnimationFrame(checkPitch);
+      }
+      requestAnimationFrame(checkPitch);
+    }
+
+    // Validation de note
+    function handleSuccess() {
+      score++;
+      const mode = document.getElementById("mode-select").value;
+      const feedback = document.getElementById("feedback");
+      feedback.textContent = "✓ Bien joué !";
+      feedback.style.color = "#4caf50";
+      setTimeout(() => { feedback.textContent = ""; }, 400);
+
+      if (mode === "sprint" && score >= targetCount) {
+        endGame(`Sprint terminé en ${((Date.now() - startTime) / 1000).toFixed(1)}s !`);
+        return;
+      }
+      nextNote();
+    }
+
+    function startGame() {
+      const mode = document.getElementById("mode-select").value;
+      score = 0;
+      isRunning = true;
+      startTime = Date.now();
+      clearInterval(timerInterval);
+
+      if (mode === "sprint") {
+        document.getElementById("score-board").textContent = `Notes : 0 / ${targetCount}`;
+        timerInterval = setInterval(() => {
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          document.getElementById("score-board").textContent = `Notes : ${score} / ${targetCount} | Temps : ${elapsed}s`;
+        }, 100);
+      } else if (mode === "survival") {
+        timeLeft = 30;
+        document.getElementById("score-board").textContent = `Score : 0 | Temps restant : ${timeLeft}s`;
+        timerInterval = setInterval(() => {
+          timeLeft--;
+          document.getElementById("score-board").textContent = `Score : ${score} | Temps restant : ${timeLeft}s`;
+          if (timeLeft <= 0) endGame(`Temps écoulé ! Score final : ${score} notes`);
+        }, 1000);
+      } else {
+        document.getElementById("score-board").textContent = "Mémorise la note (2s) puis joue-la !";
+      }
+
+      nextNote();
+    }
+
+    function endGame(message) {
+      isRunning = false;
+      clearInterval(timerInterval);
+      clearTimeout(memoryTimeout);
+      document.getElementById("score-board").textContent = message;
+      drawNote(null, true);
+    }
+
+    document.getElementById("start-btn").addEventListener("click", async () => {
+      if (!audioCtx) await initAudio();
+      if (audioCtx.state === "suspended") await audioCtx.resume();
+      startGame();
+    });
+
+    drawNote(null, true);
+  </script>
+</body>
+</html>
