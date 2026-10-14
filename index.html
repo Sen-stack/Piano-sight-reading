@@ -4,27 +4,26 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Déchiffrage Piano</title>
-  <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.4/build/cjs/vexflow.js"></script>
   <style>
     body {
-      font-family: system-ui, sans-serif;
+      font-family: system-ui, -apple-system, sans-serif;
       text-align: center;
       background: #121212;
       color: #fff;
       margin: 0;
-      padding: 10px;
+      padding: 15px;
     }
     #controls {
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
       gap: 10px;
-      margin-bottom: 15px;
+      margin-bottom: 20px;
     }
     button, select {
       padding: 10px 16px;
       font-size: 15px;
-      border-radius: 6px;
+      border-radius: 8px;
       border: 1px solid #444;
       background: #222;
       color: #fff;
@@ -32,37 +31,38 @@
     button#start-btn {
       background: #2e7d32;
       border-color: #4caf50;
-      cursor: pointer;
       font-weight: bold;
+      cursor: pointer;
     }
     #score-board {
-      font-size: 18px;
-      margin-bottom: 10px;
+      font-size: 20px;
+      margin-bottom: 15px;
       font-weight: bold;
+      min-height: 26px;
     }
-    #staff-container {
-      background: #fff;
-      border-radius: 8px;
+    #staff-card {
+      background: #ffffff;
+      border-radius: 12px;
       display: inline-block;
-      padding: 10px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      padding: 15px 25px;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.6);
     }
     #feedback {
-      height: 28px;
-      margin-top: 10px;
-      font-size: 18px;
+      height: 32px;
+      margin-top: 15px;
+      font-size: 20px;
       font-weight: bold;
     }
     #debug {
-      margin-top: 10px;
+      margin-top: 15px;
       font-family: monospace;
-      font-size: 13px;
+      font-size: 14px;
       color: #00e676;
       background: #1e1e1e;
       display: inline-block;
-      padding: 8px 14px;
-      border-radius: 4px;
-      min-width: 260px;
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid #333;
     }
   </style>
 </head>
@@ -92,12 +92,36 @@
   </div>
 
   <div id="score-board">Appuie sur Démarrer</div>
-  <div id="staff-container"><div id="output"></div></div>
+
+  <div id="staff-card">
+    <!-- Dessin SVG natif de la portée -->
+    <svg id="staff-svg" width="280" height="160" viewBox="0 0 280 160">
+      <!-- 5 Lignes de la portée (espacées de 14px) -->
+      <line x1="20" y1="45" x2="260" y2="45" stroke="#222" stroke-width="2" />
+      <line x1="20" y1="59" x2="260" y2="59" stroke="#222" stroke-width="2" />
+      <line x1="20" y1="73" x2="260" y2="73" stroke="#222" stroke-width="2" />
+      <line x1="20" y1="87" x2="260" y2="87" stroke="#222" stroke-width="2" />
+      <line x1="20" y1="101" x2="260" y2="101" stroke="#222" stroke-width="2" />
+
+      <!-- Symbole de Clé (Texte musical Unicode) -->
+      <text id="clef-symbol" x="25" y="92" font-size="52" fill="#111" font-family="serif">𝄢</text>
+
+      <!-- Éléments dynamiques de la note -->
+      <g id="note-group" style="display: none;">
+        <!-- Ligne supplémentaire si besoin -->
+        <line id="ledger-line" x1="140" y1="0" x2="180" y2="0" stroke="#222" stroke-width="2" style="display:none;" />
+        <!-- Tête de note (ovale incliné) -->
+        <ellipse id="note-head" cx="160" cy="73" rx="8.5" ry="6.5" fill="#111" transform="rotate(-20 160 73)" />
+        <!-- Hampe -->
+        <line id="note-stem" x1="168" y1="73" x2="168" y2="35" stroke="#111" stroke-width="2" />
+      </g>
+    </svg>
+  </div>
+
   <div id="feedback"></div>
-  <div id="debug">Micro inactif</div>
+  <div id="debug">Micro non démarré</div>
 
   <script>
-    const VF = Vex.Flow;
     let audioCtx, analyser;
     let isRunning = false;
     let currentNote = null;
@@ -109,42 +133,98 @@
     let startTime = 0;
     let timeLeft = 30;
 
+    // Définition des notes avec position Y sur le SVG (chaque ligne/interligne = 7px)
+    // Lignes : y=45, 59, 73, 87, 101
     const notesBass = [
-      { key: "c/3", freq: 130.81, name: "Do" },
-      { key: "d/3", freq: 146.83, name: "Ré" },
-      { key: "e/3", freq: 164.81, name: "Mi" },
-      { key: "f/3", freq: 174.61, name: "Fa" },
-      { key: "g/3", freq: 196.00, name: "Sol" },
-      { key: "a/3", freq: 220.00, name: "La" },
-      { key: "b/3", freq: 246.94, name: "Si" }
+      { name: "Do",  freq: 130.81, y: 115, ledger: 115 }, // En dessous (avec ligne supplémentaire)
+      { name: "Ré",  freq: 146.83, y: 108, ledger: null },
+      { name: "Mi",  freq: 164.81, y: 101, ledger: null }, // 1ère ligne
+      { name: "Fa",  freq: 174.61, y: 94,  ledger: null }, // 1er interligne
+      { name: "Sol", freq: 196.00, y: 87,  ledger: null }, // 2ème ligne
+      { name: "La",  freq: 220.00, y: 80,  ledger: null }, // 2ème interligne
+      { name: "Si",  freq: 246.94, y: 73,  ledger: null }, // 3ème ligne
+      { name: "Do",  freq: 261.63, y: 31,  ledger: 31 }   // Do central au-dessus (ligne supp.)
     ];
 
     const notesTreble = [
-      { key: "c/4", freq: 261.63, name: "Do" },
-      { key: "d/4", freq: 293.66, name: "Ré" },
-      { key: "e/4", freq: 329.63, name: "Mi" },
-      { key: "f/4", freq: 349.23, name: "Fa" },
-      { key: "g/4", freq: 392.00, name: "Sol" },
-      { key: "a/4", freq: 440.00, name: "La" },
-      { key: "b/4", freq: 493.88, name: "Si" }
+      { name: "Do",  freq: 261.63, y: 115, ledger: 115 }, // Do central en dessous (ligne supp.)
+      { name: "Ré",  freq: 293.66, y: 108, ledger: null },
+      { name: "Mi",  freq: 329.63, y: 101, ledger: null },
+      { name: "Fa",  freq: 349.23, y: 94,  ledger: null },
+      { name: "Sol", freq: 392.00, y: 87,  ledger: null },
+      { name: "La",  freq: 440.00, y: 80,  ledger: null },
+      { name: "Si",  freq: 493.88, y: 73,  ledger: null }
     ];
 
-    // Algorithme d'autocorrélation intégré (Pitch detection pur JS)
+    function updateClefDisplay() {
+      const clef = document.getElementById("clef-select").value;
+      const clefEl = document.getElementById("clef-symbol");
+      if (clef === "bass") {
+        clefEl.textContent = "𝄢"; // Clé de Fa
+        clefEl.setAttribute("y", "90");
+        clefEl.setAttribute("font-size", "55");
+      } else {
+        clefEl.textContent = "𝄞"; // Clé de Sol
+        clefEl.setAttribute("y", "105");
+        clefEl.setAttribute("font-size", "68");
+      }
+    }
+
+    document.getElementById("clef-select").addEventListener("change", () => {
+      updateClefDisplay();
+      if (isRunning) nextNote();
+    });
+
+    function renderNote(noteObj, visible = true) {
+      const group = document.getElementById("note-group");
+      if (!visible || !noteObj) {
+        group.style.display = "none";
+        return;
+      }
+      group.style.display = "block";
+
+      const head = document.getElementById("note-head");
+      const stem = document.getElementById("note-stem");
+      const ledger = document.getElementById("ledger-line");
+
+      head.setAttribute("cy", noteObj.y);
+      head.setAttribute("transform", `rotate(-20 160 ${noteObj.y})`);
+
+      // Hampe vers le haut ou vers le bas
+      if (noteObj.y >= 73) {
+        stem.setAttribute("x1", "168");
+        stem.setAttribute("x2", "168");
+        stem.setAttribute("y1", noteObj.y);
+        stem.setAttribute("y2", noteObj.y - 36);
+      } else {
+        stem.setAttribute("x1", "152");
+        stem.setAttribute("x2", "152");
+        stem.setAttribute("y1", noteObj.y);
+        stem.setAttribute("y2", noteObj.y + 36);
+      }
+
+      if (noteObj.ledger !== null) {
+        ledger.style.display = "block";
+        ledger.setAttribute("y1", noteObj.ledger);
+        ledger.setAttribute("y2", noteObj.ledger);
+      } else {
+        ledger.style.display = "none";
+      }
+    }
+
     function autoCorrelate(buffer, sampleRate) {
       let size = buffer.length;
       let sumOfSquares = 0;
-      for (let i = 0; i < size; i++) {
-        sumOfSquares += buffer[i] * buffer[i];
-      }
-      let rootMeanSquare = Math.sqrt(sumOfSquares / size);
-      if (rootMeanSquare < 0.008) return -1; // Volume trop faible
+      for (let i = 0; i < size; i++) sumOfSquares += buffer[i] * buffer[i];
+      let rms = Math.sqrt(sumOfSquares / size);
+      if (rms < 0.008) return -1;
 
-      let r1 = 0, r2 = size - 1, threshold = 0.2;
+      let r1 = 0, r2 = size - 1, th = 0.2;
       for (let i = 0; i < size / 2; i++) {
-        if (Math.abs(buffer[i]) < threshold) { r1 = i; break; }
+        if (Math.abs(buffer[i]) < th) { r1 = i; break; }
       }
       for (let i = 1; i < size / 2; i++) {
-        if (Math.abs(buffer[size - i]) < threshold) { r2 = size - i; break; }
+        if (Math.abs(buffer[size - i]) < th) { r2 = size - i; break; }
       }
 
       buffer = buffer.slice(r1, r2);
@@ -152,23 +232,16 @@
 
       let c = new Array(size).fill(0);
       for (let i = 0; i < size; i++) {
-        for (let j = 0; j < size - i; j++) {
-          c[i] = c[i] + buffer[j] * buffer[j + i];
-        }
+        for (let j = 0; j < size - i; j++) c[i] += buffer[j] * buffer[j + i];
       }
 
       let d = 0;
       while (c[d] > c[d + 1]) d++;
       let maxval = -1, maxpos = -1;
       for (let i = d; i < size; i++) {
-        if (c[i] > maxval) {
-          maxval = c[i];
-          maxpos = i;
-        }
+        if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
       }
       let T0 = maxpos;
-
-      // Interpolation parabolique pour affiner la fréquence
       let x1 = c[T0 - 1], x2 = c[T0], x3 = c[T0 + 1];
       let a = (x1 + x3 - 2 * x2) / 2;
       let b = (x3 - x1) / 2;
@@ -177,43 +250,18 @@
       return sampleRate / T0;
     }
 
-    function drawNote(noteObj, hideNote = false) {
-      const container = document.getElementById("output");
-      container.innerHTML = "";
-      const clef = document.getElementById("clef-select").value;
-
-      const renderer = new VF.Renderer(container, VF.Renderer.Backends.SVG);
-      renderer.resize(250, 150);
-      const context = renderer.getContext();
-
-      const stave = new VF.Stave(10, 10, 230);
-      stave.addClef(clef).setContext(context).draw();
-
-      if (!hideNote && noteObj) {
-        const staveNote = new VF.StaveNote({
-          clef: clef,
-          keys: [noteObj.key],
-          duration: "q"
-        });
-        const voice = new VF.Voice({ num_beats: 1, beat_value: 4 });
-        voice.addTickables([staveNote]);
-        new VF.Formatter().joinVoices([voice]).format([voice], 120);
-        voice.draw(context, stave);
-      }
-    }
-
     function nextNote() {
       const clef = document.getElementById("clef-select").value;
       const mode = document.getElementById("mode-select").value;
-      const notePool = clef === "bass" ? notesBass : notesTreble;
+      const pool = clef === "bass" ? notesBass : notesTreble;
 
-      currentNote = notePool[Math.floor(Math.random() * notePool.length)];
-      drawNote(currentNote, false);
+      currentNote = pool[Math.floor(Math.random() * pool.length)];
+      renderNote(currentNote, true);
 
       clearTimeout(memoryTimeout);
       if (mode === "memory") {
         memoryTimeout = setTimeout(() => {
-          drawNote(null, true);
+          renderNote(null, false);
         }, 2000);
       }
     }
@@ -231,7 +279,7 @@
         analyser.fftSize = 2048;
         source.connect(analyser);
 
-        debugEl.textContent = "Micro prêt. Joue une note !";
+        debugEl.textContent = "Micro connecté. Prêt !";
         listenAudio();
       } catch (err) {
         debugEl.textContent = "Erreur micro : " + err.message;
@@ -245,24 +293,23 @@
       function checkPitch() {
         if (!isRunning) return;
         analyser.getFloatTimeDomainData(buffer);
-
         const pitch = autoCorrelate(buffer, audioCtx.sampleRate);
 
-        if (pitch !== -1 && pitch > 60 && pitch < 1200) {
-          const roundedPitch = Math.round(pitch);
-          debugEl.textContent = `Hz : ${roundedPitch}`;
+        if (pitch !== -1 && pitch > 65 && pitch < 1000) {
+          const rounded = Math.round(pitch);
+          debugEl.textContent = `Fréquence entendue : ${rounded} Hz`;
 
           if (currentNote) {
             const matchesBase = Math.abs(pitch - currentNote.freq) / currentNote.freq < 0.08;
-            const matchesOctaveUp = Math.abs(pitch - (currentNote.freq * 2)) / (currentNote.freq * 2) < 0.08;
-            const matchesOctaveDown = Math.abs(pitch - (currentNote.freq / 2)) / (currentNote.freq / 2) < 0.08;
+            const matchesUp   = Math.abs(pitch - (currentNote.freq * 2)) / (currentNote.freq * 2) < 0.08;
+            const matchesDown = Math.abs(pitch - (currentNote.freq / 2)) / (currentNote.freq / 2) < 0.08;
 
-            if (matchesBase || matchesOctaveUp || matchesOctaveDown) {
+            if (matchesBase || matchesUp || matchesDown) {
               handleSuccess();
             }
           }
         } else {
-          debugEl.textContent = "En attente d'une note...";
+          debugEl.textContent = "Écoute en cours...";
         }
         requestAnimationFrame(checkPitch);
       }
@@ -278,11 +325,56 @@
       setTimeout(() => { feedback.textContent = ""; }, 400);
 
       if (mode === "sprint" && score >= targetCount) {
-        endGame(`Sprint terminé en ${((Date.now() - startTime) / 1000).toFixed(1)}s !`);
+        endGame(`Terminé en ${((Date.now() - startTime) / 1000).toFixed(1)}s !`);
         return;
       }
       nextNote();
     }
 
     function startGame() {
-      const mode = document.getElementById("mode-select
+      const mode = document.getElementById("mode-select").value;
+      score = 0;
+      isRunning = true;
+      startTime = Date.now();
+      clearInterval(timerInterval);
+
+      if (mode === "sprint") {
+        document.getElementById("score-board").textContent = `Notes : 0 / ${targetCount}`;
+        timerInterval = setInterval(() => {
+          const elap = ((Date.now() - startTime) / 1000).toFixed(1);
+          document.getElementById("score-board").textContent = `Notes : ${score} / ${targetCount} | ${elap}s`;
+        }, 100);
+      } else if (mode === "survival") {
+        timeLeft = 30;
+        document.getElementById("score-board").textContent = `Score : 0 | ${timeLeft}s`;
+        timerInterval = setInterval(() => {
+          timeLeft--;
+          document.getElementById("score-board").textContent = `Score : ${score} | ${timeLeft}s`;
+          if (timeLeft <= 0) endGame(`Temps écoulé ! Score : ${score}`);
+        }, 1000);
+      } else {
+        document.getElementById("score-board").textContent = "Mémorise (2s) puis joue !";
+      }
+
+      nextNote();
+    }
+
+    function endGame(msg) {
+      isRunning = false;
+      clearInterval(timerInterval);
+      clearTimeout(memoryTimeout);
+      document.getElementById("score-board").textContent = msg;
+      document.getElementById("debug").textContent = "Session terminée";
+      renderNote(null, false);
+    }
+
+    document.getElementById("start-btn").addEventListener("click", async () => {
+      if (!audioCtx) await initAudio();
+      if (audioCtx && audioCtx.state === "suspended") await audioCtx.resume();
+      startGame();
+    });
+
+    updateClefDisplay();
+  </script>
+</body>
+</html>
